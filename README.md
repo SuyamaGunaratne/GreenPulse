@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # GreenPulse – Smart Agentic IoT Plant-Care Device
 
 ## 1. Overview
@@ -1041,3 +1042,6 @@ Python Backend
   ↓
 Sensor JSON
 ```
+=======
+"# GreenPulse" 
+>>>>>>> 236cd34bbd775c5c5dfebbc0c7824d3211a657a5
