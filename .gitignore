@@ -1,0 +1,54 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Type-checking and linting caches
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.code-workspace
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local certificates and private keys
+certs/
+*.pem
+*.key
+*.crt
