@@ -1,0 +1,9 @@
+{
+  "device_id": {"S": "GP001"},
+  "reading_id": {"S": "TEST-001"},
+  "temperature": {"N": "30.7"},
+  "humidity": {"N": "77.3"},
+  "soil_moisture": {"N": "0"},
+  "soil_raw": {"N": "4095"},
+  "record_type": {"S": "connection_test"}
+}
