@@ -1,101 +1,137 @@
-
+"""GreenPulse AI plant-care recommendations using LangChain + Groq."""
 import json
 import os
+import re
 
 from dotenv import load_dotenv
-from google import genai
-
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq
 
 load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is missing from .env")
-
-client = genai.Client(api_key=GEMINI_API_KEY)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
 
-def care_recommendation(
-    sensor_data,
-    weather=None,
-    assessment=None,
-):
-    """
-    Generate plant-care advice from sensor readings,
-    weather context, and the rule-based assessment.
+def _create_llm():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is missing from .env.")
 
-    Returns a dictionary containing:
-    summary, recommendations, and precautions.
-    """
-
-    weather = weather or {}
-    assessment = assessment or {}
-
-    context = {
-        "sensor_readings": sensor_data,
-        "weather": weather,
-        "rule_based_assessment": assessment,
-    }
-
-    prompt = f"""
-You are the plant-care assistant for GreenPulse, an IoT system.
-
-Use the supplied sensor readings, weather data, and rule-based
-assessment to provide cautious, practical plant-care guidance.
-
-Requirements:
-- Do not assume all plants have identical requirements.
-- Treat sensor readings and the rule-based assessment as evidence,
-  not as a guaranteed diagnosis.
-- Do not recommend watering solely from outdoor weather data.
-- If soil appears wet, advise checking drainage and the actual soil
-  before adding more water.
-- If information is missing, acknowledge the uncertainty.
-- Do not invent measurements or claim actions were performed.
-- Keep the advice concise and easy to understand.
-
-Return ONLY valid JSON using this exact structure:
-{{
-  "summary": "A short description of the current situation",
-  "recommendations": [
-    "Practical action 1",
-    "Practical action 2"
-  ],
-  "precautions": [
-    "Important uncertainty or precaution"
-  ]
-}}
-
-GreenPulse context:
-{json.dumps(context, indent=2)}
-"""
-
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-        },
+    # Ask Groq to return JSON rather than free-form prose.
+    return ChatGroq(
+        model=GROQ_MODEL,
+        temperature=0.2,
+        # GPT-OSS may spend a portion of its completion budget on reasoning.
+        # 1200 tokens gives it room to finish a small JSON response reliably.
+        max_tokens=1200,
+        timeout=45,
+        max_retries=1,
+        model_kwargs={"response_format": {"type": "json_object"}},
     )
 
-    if not response.text:
-        raise ValueError("Gemini returned an empty response.")
 
-    result = json.loads(response.text)
+def _normalize_sensor_data(sensor_data):
+    if not isinstance(sensor_data, dict):
+        sensor_data = {}
+    readings = sensor_data.get("environment")
+    if not isinstance(readings, dict):
+        readings = sensor_data.get("sensor_data")
+    if not isinstance(readings, dict):
+        readings = sensor_data
+    return {
+        "device_id": sensor_data.get("device_id", readings.get("device_id")),
+        "temperature": readings.get("temperature"),
+        "humidity": readings.get("humidity"),
+        "soil_moisture": readings.get("soil_moisture"),
+        "soil_raw": readings.get("soil_raw"),
+        "light": readings.get("light"),
+        "plant_status": readings.get("plant_status"),
+    }
 
-    # Validate the basic response structure before using it.
+
+def _response_text(response):
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+        return "\n".join(parts).strip()
+    return str(content).strip() if content else ""
+
+
+def _parse_json_response(content):
+    cleaned = content.strip().lstrip("\ufeff")
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Fallback for responses that wrap JSON in explanatory text.
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
+            preview = cleaned[:500].replace("\n", " ")
+            raise ValueError(
+                "Groq response did not contain a JSON object. "
+                f"Response preview: {preview!r}"
+            )
+        try:
+            result = json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError as exc:
+            preview = cleaned[:500].replace("\n", " ")
+            raise ValueError(
+                "Groq response contained malformed JSON. "
+                f"Response preview: {preview!r}"
+            ) from exc
+
     if not isinstance(result, dict):
-        raise ValueError("Gemini response must be a JSON object.")
+        raise ValueError("Groq response must be a JSON object.")
 
-    if not isinstance(result.get("summary"), str):
-        raise ValueError("Gemini response is missing a valid summary.")
+    summary = result.get("summary")
+    recommendations = result.get("recommendations")
+    precautions = result.get("precautions")
 
-    if not isinstance(result.get("recommendations"), list):
-        raise ValueError("Gemini response recommendations must be a list.")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Groq JSON is missing a non-empty 'summary' string.")
+    for field, value in (("recommendations", recommendations), ("precautions", precautions)):
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"Groq JSON field '{field}' must be an array of strings.")
 
-    if not isinstance(result.get("precautions"), list):
-        raise ValueError("Gemini response precautions must be a list.")
+    return {
+        "summary": summary.strip(),
+        "recommendations": [item.strip() for item in recommendations if item.strip()],
+        "precautions": [item.strip() for item in precautions if item.strip()],
+    }
 
+
+def care_recommendation(sensor_data, weather=None, assessment=None):
+    """Return validated AI advice in the shape expected by the existing backend."""
+    context = {
+        "sensor_readings": _normalize_sensor_data(sensor_data),
+        "weather": weather if isinstance(weather, dict) else {},
+        "rule_based_assessment": assessment if isinstance(assessment, dict) else {},
+    }
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are GreenPulse's plant-care assistant. Use only the supplied readings, weather and rule-based assessment. Be cautious: never invent data, plant species, diagnoses, or actions performed. A low soil-moisture percentage can indicate dry soil, but tell the user to check the soil physically before watering. Do not recommend watering based only on outdoor weather. Mention missing or uncertain data in precautions. Do not infer air quality from raw sensor values.
+
+Return ONLY one valid JSON object with exactly these keys:
+{{"summary":"one short sentence","recommendations":["one concise action"],"precautions":["one concise precaution"]}}
+Use 1-2 short recommendations and 1-2 short precautions. No Markdown, no extra keys, and no text outside the JSON."""),
+        ("human", "GreenPulse context:\n{context}"),
+    ])
+
+    response = (prompt | _create_llm()).invoke({
+        "context": json.dumps(context, ensure_ascii=False, indent=2, default=str)
+    })
+    content = _response_text(response)
+    if not content:
+        raise RuntimeError("Groq returned an empty care recommendation.")
+
+    result = _parse_json_response(content)
+    result["message_type"] = "groq_ai_recommendation"
     return result
